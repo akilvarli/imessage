@@ -1,36 +1,117 @@
-import { ApolloServer } from 'apollo-server-express';
-import { ApolloServerPluginDrainHttpServer, ApolloServerPluginLandingPageLocalDefault } from 'apollo-server-core';
-import { makeExecutableSchema } from '@graphql-tools/schema';
-import express from 'express';
-import http from 'http';
-import typeDefs from './graphql/typeDefs';
-import resolvers from './graphql/resolvers';
+import { makeExecutableSchema } from "@graphql-tools/schema";
+import { PrismaClient } from "@prisma/client";
+import { ApolloServer } from "@apollo/server";
+import { ApolloServerPluginDrainHttpServer } from "@apollo/server/plugin/drainHttpServer";
+import { expressMiddleware } from "@apollo/server/express4";
+import express from "express";
+import { PubSub } from "graphql-subscriptions";
+import { useServer } from "graphql-ws/lib/use/ws";
+import { createServer } from "http";
+import { WebSocketServer } from "ws";
+import { getSession } from "next-auth/react";
+import resolvers from "./graphql/resolvers";
+import typeDefs from "./graphql/typeDefs";
+import { GraphQLContext, Session, SubscriptionContext } from "./util/types";
+import * as dotenv from "dotenv";
+import cors from "cors";
+import { json } from "body-parser";
 
-async function main() {
-
-  const app = express();
-  const httpServer = http.createServer(app);
-
+const main = async () => {
+  dotenv.config();
+  // Create the schema, which will be used separately by ApolloServer and
+  // the WebSocket server.
   const schema = makeExecutableSchema({
     typeDefs,
-    resolvers
-  })
+    resolvers,
+  });
 
+  // Create an Express app and HTTP server; we will attach both the WebSocket
+  // server and the ApolloServer to this HTTP server.
+  const app = express();
+  const httpServer = createServer(app);
+
+  // Create our WebSocket server using the HTTP server we just set up.
+  const wsServer = new WebSocketServer({
+    server: httpServer,
+    path: "/graphql",
+  });
+
+  // Context parameters
+  const prisma = new PrismaClient();
+  const pubsub = new PubSub();
+
+  const getSubscriptionContext = async (
+    ctx: SubscriptionContext
+  ): Promise<GraphQLContext> => {
+    ctx;
+    // ctx is the apollo-server-core-ws Context where connectionParams live
+    if (ctx.connectionParams && ctx.connectionParams.session) {
+      console.log("SERVER CONTEXT", ctx.connectionParams);
+      const { session } = ctx.connectionParams;
+      return { session, prisma, pubsub };
+    }
+    // Otherwise let our resolvers know we don't have a current user
+    return { session: null, prisma, pubsub };
+  };
+
+  // Save the returned server's info so we can shutdown this server later
+  const serverCleanup = useServer(
+    {
+      schema,
+      context: (ctx: SubscriptionContext) => {
+        // This will be run every time the client sends a subscription request
+        // Returning an object will add that information to our
+        // GraphQL context, which all of our resolvers have access to.
+        return getSubscriptionContext(ctx);
+      },
+    },
+    wsServer
+  );
+  // Set up ApolloServer.
   const server = new ApolloServer({
     schema,
     csrfPrevention: true,
-    cache: 'bounded',
-    plugins: [ApolloServerPluginDrainHttpServer({ httpServer }), ApolloServerPluginLandingPageLocalDefault({ embed: true })],
-  });
+    plugins: [
+      // Proper shutdown for the HTTP server.
+      ApolloServerPluginDrainHttpServer({ httpServer }),
 
+      // Proper shutdown for the WebSocket server.
+      {
+        async serverWillStart() {
+          return {
+            async drainServer() {
+              await serverCleanup.dispose();
+            },
+          };
+        },
+      },
+    ],
+  });
   await server.start();
-  server.applyMiddleware({
-    app,
-    path: '/graphql',
-  });
 
-  // Modified server startup
-  await new Promise<void>((resolve) => httpServer.listen({ port: 4000 }, resolve));
-  console.log(`🚀 Server ready at http://localhost:4000${server.graphqlPath}`);
-}
-main().catch((err) => console.log(err))
+
+  app.use(
+    "/graphql",
+    cors<cors.CorsRequest>({ origin: [process.env.CLIENT_ORIGIN as string, 'https://studio.apollographql.com'], credentials: true }),
+    json(),
+    expressMiddleware(server, {
+      context: async ({ req }): Promise<GraphQLContext> => {
+        const session = await getSession({ req });
+        return { session: session as Session, prisma, pubsub };
+      },
+    })
+  );
+
+  // server.applyMiddleware({ app, path: "/apollo-server-core", cors: corsOptions });
+
+  const PORT = 4000;
+
+  // Now that our HTTP server is fully set up, we can listen to it.
+  await new Promise<void>((resolve) =>
+    httpServer.listen({ port: PORT }, resolve)
+  );
+  console.log(`🚀 Server ready at http://localhost:4000/graphql`);
+
+};
+
+main().catch((err) => console.log(err));

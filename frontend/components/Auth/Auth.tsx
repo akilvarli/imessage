@@ -2,6 +2,10 @@ import { Button, Center, Stack, Text, Image, Input } from '@chakra-ui/react'
 import { signIn } from 'next-auth/react'
 import React, { useState } from 'react'
 import { Session } from 'next-auth';
+import UserOperations from '../../graphql/operations/user';
+import { useMutation } from '@apollo/client';
+import { CreateUsernameData, CreateUsernameVariables } from '../../util/types';
+import toast from 'react-hot-toast';
 
 type IAuthProps = {
     session: Session | null;
@@ -15,12 +19,37 @@ const Auth: React.FC<IAuthProps> = ({
 
     const [username, setUsername] = useState("");
 
+    const [createUsername, { error, loading }] = useMutation<
+        CreateUsernameData,
+        CreateUsernameVariables
+    >(UserOperations.Mutations.createUsername)
+
     const onSubmit = async () => {
+        if (!username) return;
         try {
+            const { data } = await createUsername({ variables: { username } });
+
+            if (!data?.createUsername) {
+                throw new Error();
+            }
+
+            if (data.createUsername.error) {
+                const {
+                    createUsername: { error }
+                } = data;
+
+                throw new Error(error);
+            }
+
+            toast.success('Username successfully created 🚀')
+
             /**
-             * createUserName mutation send our username to the GraphQL API
+             * Reload session to obtain new username
              */
-        } catch (error) {
+            reloadSession();
+
+        } catch (error: any) {
+            toast.error(error?.message)
             console.log("onSubmit error", error);
         }
     }
@@ -34,9 +63,9 @@ const Auth: React.FC<IAuthProps> = ({
                         <Input
                             placeholder='Enter a username'
                             value={username}
-                            onChange={(e) => e.target.value}
+                            onChange={(e) => setUsername(e.target.value)}
                         />
-                        <Button width="100%" onClick={onSubmit}>Save</Button>
+                        <Button width="100%" onClick={onSubmit} isLoading={loading}>Save</Button>
                     </>
                 ) : (
                     <>

@@ -11,10 +11,19 @@ const Home: NextPage = () => {
   console.log("HERE IS DATA", session);
 
   const reloadSession = () => {
-
+    const event = new Event("visibilitychange");
+    document.dispatchEvent(event);
   }
 
-  return <Box>{session?.user.username ? <Chat /> : <Auth session={session} reloadSession={reloadSession} />}</Box>
+  return (
+    <Box>
+      {session?.user.username ? (
+        <Chat session={session} />
+      ) : (
+        <Auth session={session} reloadSession={reloadSession} />
+      )}
+    </Box>
+  )
 }
 
 export async function getServerSideProps(context: NextPageContext) {
